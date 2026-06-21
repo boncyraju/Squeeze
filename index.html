@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Squeeze â€” on-device file compressor</title>
+<title>Squeeze — on-device file compressor</title>
 <meta name="description" content="Compress PDFs and images on your phone. Set a level or a target size. Nothing leaves the device." />
 <meta name="theme-color" content="#0F1318" />
 <link rel="manifest" href="manifest.json" />
@@ -174,7 +174,7 @@
     </div>
     <div class="brand">
       <h1>Squeeze</h1>
-      <p>Compress PDFs &amp; images â€” <b>nothing leaves your phone</b></p>
+      <p>Compress PDFs &amp; images — <b>nothing leaves your phone</b></p>
     </div>
   </header>
 
@@ -190,22 +190,22 @@
         <span class="eyebrow">Compression level</span>
         <span class="qval" id="qval">70%</span>
       </div>
-      <label class="ctl-label" for="quality">Quality â€” lower means smaller files</label>
+      <label class="ctl-label" for="quality">Quality — lower means smaller files</label>
       <input type="range" id="quality" min="30" max="95" value="70" step="5" />
       <div class="seg">
         <span class="ctl-label">Size budget</span>
         <div class="chips" id="presets" role="group" aria-label="Size budget">
-          <button class="chip" data-key="large"    aria-pressed="false">Keep large<small>2560 Â· 150dpi</small></button>
-          <button class="chip" data-key="standard" aria-pressed="true">Standard<small>1600 Â· 120dpi</small></button>
-          <button class="chip" data-key="compact"  aria-pressed="false">Compact<small>1024 Â· 96dpi</small></button>
-          <button class="chip" data-key="tiny"     aria-pressed="false">Tiny<small>800 Â· 72dpi</small></button>
+          <button class="chip" data-key="large"    aria-pressed="false">Keep large<small>2560 · 150dpi</small></button>
+          <button class="chip" data-key="standard" aria-pressed="true">Standard<small>1600 · 120dpi</small></button>
+          <button class="chip" data-key="compact"  aria-pressed="false">Compact<small>1024 · 96dpi</small></button>
+          <button class="chip" data-key="tiny"     aria-pressed="false">Tiny<small>800 · 72dpi</small></button>
         </div>
       </div>
     </div>
 
     <!-- TARGET MODE -->
     <div class="pane" id="pane-target" hidden>
-      <label class="ctl-label" for="target">Target size â€” each file ends at or below this</label>
+      <label class="ctl-label" for="target">Target size — each file ends at or below this</label>
       <div class="targetrow">
         <input type="number" id="target" min="1" step="1" value="500" inputmode="numeric" />
         <div class="unit" role="group" aria-label="Unit">
@@ -270,6 +270,161 @@ if (window.pdfjsLib){
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
+/* ---------- helpers ---------- */
+function fmt(b){
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(0) + ' KB';
+  return (b/(1024*1024)).toFixed(2) + ' MB';
+}
+function outFormat(file){
+  const t = file.type;
+  if (t === 'image/png' || t === 'image/webp') return {mime:'image/webp', ext:'webp', alpha:true};
+  return {mime:'image/jpeg', ext:'jpg', alpha:false};
+}
+function baseName(n){ return n.replace(/\.[^.]+$/, ''); }
+function currentTargetBytes(){
+  const v = Math.max(1, +($('#target').value || 0));
+  return targetUnit === 'MB' ? Math.round(v*1024*1024) : Math.round(v*1024);
+}
+
+/* ---------- canvas utils ---------- */
+function loadImage(file){
+  return new Promise((res,rej)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = ()=>{ URL.revokeObjectURL(url); res(img); };
+    img.onerror = ()=>{ URL.revokeObjectURL(url); rej(new Error('Could not read image')); };
+    img.src = url;
+  });
+}
+function drawCanvas(img, w, h, alpha){
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  if (!alpha){ ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,w,h); }
+  ctx.drawImage(img,0,0,w,h);
+  return cv;
+}
+const encode = (cv,mime,q)=> new Promise(r=>cv.toBlob(r,mime,q));
+function freeCanvas(cv){ if(cv){cv.width=0;cv.height=0;} }
+
+/* ---------- LEVEL-mode compression ---------- */
+async function compressImage(file){
+  const {maxDim} = PRESETS[presetKey];
+  const f = outFormat(file);
+  const img = await loadImage(file);
+  let w = img.naturalWidth, h = img.naturalHeight;
+  const longest = Math.max(w,h);
+  if (longest > maxDim){ const s = maxDim/longest; w=Math.round(w*s); h=Math.round(h*s); }
+  const cv = drawCanvas(img,w,h,f.alpha);
+  const blob = await encode(cv,f.mime,quality);
+  freeCanvas(cv);
+  return {blob, ext:f.ext};
+}
+async function renderPdf(file, dpi, onPage){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+  const pages = [];
+  for (let i=1;i<=pdf.numPages;i++){
+    onPage && onPage(i, pdf.numPages);
+    const page = await pdf.getPage(i);
+    const vp = page.getViewport({scale:dpi/72});
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1,Math.floor(vp.width));
+    cv.height = Math.max(1,Math.floor(vp.height));
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,cv.width,cv.height);
+    await page.render({canvasContext:ctx, viewport:vp}).promise;
+    pages.push({cv, wpt:vp.width*72/dpi, hpt:vp.height*72/dpi});
+  }
+  return pages;
+}
+function assemblePdf(pages, q){
+  const { jsPDF } = window.jspdf;
+  let out = null;
+  for (let i=0;i<pages.length;i++){
+    const p = pages[i];
+    const orient = p.wpt > p.hpt ? 'l' : 'p';
+    if (i===0) out = new jsPDF({orientation:orient, unit:'pt', format:[p.wpt,p.hpt]});
+    else out.addPage([p.wpt,p.hpt], orient);
+    out.addImage(p.cv.toDataURL('image/jpeg', q), 'JPEG', 0,0, p.wpt, p.hpt);
+  }
+  return out.output('blob');
+}
+function downscalePages(pages, factor){
+  for (const p of pages){
+    const nw = Math.max(1,Math.floor(p.cv.width*factor));
+    const nh = Math.max(1,Math.floor(p.cv.height*factor));
+    const cv2 = document.createElement('canvas'); cv2.width=nw; cv2.height=nh;
+    const ctx = cv2.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,nw,nh);
+    ctx.drawImage(p.cv,0,0,nw,nh);
+    freeCanvas(p.cv); p.cv = cv2;       // page point-size unchanged → resolution drops
+  }
+}
+function freePages(pages){ pages.forEach(p=>freeCanvas(p.cv)); }
+
+async function compressPdf(file, onPage){
+  const {dpi} = PRESETS[presetKey];
+  const pages = await renderPdf(file, dpi, onPage);
+  const blob = assemblePdf(pages, quality);
+  freePages(pages);
+  return {blob, ext:'pdf'};
+}
+
+/* ---------- TARGET-mode compression (best-effort search) ---------- */
+async function compressImageToTarget(file, target){
+  const f = outFormat(file);
+  const img = await loadImage(file);
+  const longest = Math.max(img.naturalWidth, img.naturalHeight);
+  let cap = Math.min(longest, 2600);
+  let smallest = null;
+  for (let pass=0; pass<6; pass++){
+    const s = cap/longest;
+    const w = Math.max(1,Math.round(img.naturalWidth*s));
+    const h = Math.max(1,Math.round(img.naturalHeight*s));
+    const cv = drawCanvas(img,w,h,f.alpha);
+    const floor = await encode(cv, f.mime, 0.2);
+    if (!smallest || floor.size < smallest.blob.size) smallest = {blob:floor, ext:f.ext};
+    if (floor.size > target){ freeCanvas(cv); cap = Math.round(cap*0.72); if(cap<48)break; continue; }
+    // floor fits → climb to best quality still under target
+    let lo=0.2, hi=0.95, best={blob:floor, ext:f.ext};
+    for (let i=0;i<7;i++){
+      const q=(lo+hi)/2;
+      const blob = await encode(cv, f.mime, q);
+      if (blob.size <= target){ best={blob, ext:f.ext}; lo=q; } else { hi=q; }
+    }
+    freeCanvas(cv);
+    return {...best, met:true};
+  }
+  return {...smallest, met:false};
+}
+async function compressPdfToTarget(file, target, onStatus){
+  let pages = await renderPdf(file, 150, (i,t)=> onStatus && onStatus(`rendering ${i}/${t}`));
+  let smallest = null;
+  for (let pass=0; pass<5; pass++){
+    onStatus && onStatus(`fitting · pass ${pass+1}`);
+    const floor = assemblePdf(pages, 0.2);
+    if (!smallest || floor.size < smallest.size) smallest = floor;
+    if (floor.size > target){ downscalePages(pages, 0.8); continue; }
+    let lo=0.2, hi=0.92, best=floor;
+    for (let i=0;i<5;i++){
+      const q=(lo+hi)/2;
+      const blob = assemblePdf(pages, q);
+      if (blob.size <= target){ best=blob; lo=q; } else { hi=q; }
+    }
+    freePages(pages);
+    return {blob:best, ext:'pdf', met:true};
+  }
+  freePages(pages);
+  return {blob:smallest, ext:'pdf', met:false};
+}
+
+/* ---------- process ---------- */
+async function processOne(st){
+  setStatus(st,'working');
+  try{
+    const original = st.originalSize;
+    const origExt = st.file.name.split('.').pop();
     if (mode === 'target'){
       const target = currentTargetBytes();
       st.target = target;
@@ -310,24 +465,24 @@ function renderCard(st){
 
   let resultHtml = '';
   if (st.status === 'working'){
-    resultHtml = `<div class="status" style="margin-top:11px"><span class="spin"></span>${st._extra?('Compressing â€” '+st._extra):'Compressingâ€¦'}</div>`;
+    resultHtml = `<div class="status" style="margin-top:11px"><span class="spin"></span>${st._extra?('Compressing — '+st._extra):'Compressing…'}</div>`;
   } else if (st.status === 'error'){
     resultHtml = `<div class="status err" style="margin-top:11px">${st.error}</div>`;
   } else if (st.status === 'done'){
     const pct = Math.max(0, Math.round((1 - st.resultSize/st.originalSize)*100));
     const fillW = Math.max(4, Math.round(st.resultSize/st.originalSize*100));
-    const savedLabel = st.flat ? (st.target!==undefined ? 'already under' : 'already optimized') : ('âˆ’'+pct+'%');
+    const savedLabel = st.flat ? (st.target!==undefined ? 'already under' : 'already optimized') : ('−'+pct+'%');
     let tline = '';
     if (st.target !== undefined){
       tline = st.met
-        ? `<div class="tline ok">âœ“ at or below target ${fmt(st.target)}</div>`
-        : `<div class="tline miss">couldn't reach ${fmt(st.target)} â€” this is the smallest readable version</div>`;
+        ? `<div class="tline ok">✓ at or below target ${fmt(st.target)}</div>`
+        : `<div class="tline miss">couldn't reach ${fmt(st.target)} — this is the smallest readable version</div>`;
     }
     resultHtml = `
       <div class="result show">
         <div class="bar"><span style="width:${fillW}%"></span></div>
         <div class="rrow">
-          <div class="from-to"><b>${fmt(st.originalSize)}</b> â†’ <b>${fmt(st.resultSize)}</b></div>
+          <div class="from-to"><b>${fmt(st.originalSize)}</b> → <b>${fmt(st.resultSize)}</b></div>
           <div class="saved ${st.flat?'flat':''}">${savedLabel}</div>
         </div>
         ${tline}
@@ -337,14 +492,15 @@ function renderCard(st){
         </a>
       </div>`;
   }
-el.innerHTML = `
+
+  el.innerHTML = `
     <div class="card-top">
       <div class="ftype ${isPdf?'pdf':''}">${tag}</div>
       <div class="fmeta">
         <div class="fname">${st.file.name}</div>
         <div class="fsub">${fmt(st.originalSize)}</div>
       </div>
-      <button class="xbtn" aria-label="Remove" data-remove="${st.id}">Ã—</button>
+      <button class="xbtn" aria-label="Remove" data-remove="${st.id}">×</button>
     </div>
     ${resultHtml}`;
 
@@ -363,7 +519,7 @@ function refreshBar(){
   const working = [...files.values()].some(s => s.status === 'working');
   const anyPending = [...files.values()].some(s => s.status === 'queued');
   $('#runBtn').disabled = working || (!has);
-  $('#runBtn').textContent = working ? 'Workingâ€¦' : (anyPending ? 'Compress all' : 'Done â€” re-run');
+  $('#runBtn').textContent = working ? 'Working…' : (anyPending ? 'Compress all' : 'Done — re-run');
 
   const done = [...files.values()].filter(s => s.status === 'done' && s.result).length;
   const dlAll = $('#dlAllBtn');
@@ -387,7 +543,7 @@ async function downloadAll(){
   const done = [...files.values()].filter(s => s.status === 'done' && s.result);
   if (!done.length) return;
   const btn = $('#dlAllBtn');
-  btn.disabled = true; btn.textContent = 'Packagingâ€¦';
+  btn.disabled = true; btn.textContent = 'Packaging…';
   try{
     if (done.length === 1){
       const st = done[0];
